@@ -1,0 +1,9 @@
+
+.databricks
+.venv
+__pycache__
+*.pyc
+.claude
+.ai-dev-kit
+.vscode
+.mcp.json
