@@ -1,0 +1,82 @@
+# This is a Databricks asset bundle definition for app_with_image_rendering.
+# See https://docs.databricks.com/dev-tools/bundles/index.html for documentation.
+
+bundle:
+  name: app_with_image_rendering
+
+resources:
+  apps:
+    pokemon_card_explorer:
+      name: pokemon-card-explorer-${bundle.target}
+      description: "Pokemon Card Explorer - Vector Search demo"
+      source_code_path: ./app
+
+      resources:
+        - name: sql-warehouse
+          description: "SQL warehouse for analytical queries"
+          sql_warehouse:
+            id: 995bc1ffd2ff99a4
+            permission: CAN_USE
+
+        - name: vs-index
+          description: "Vector Search index for card search"
+          uc_securable:
+            securable_full_name: doan.pokemon_cards.cards_index
+            securable_type: TABLE
+            permission: SELECT
+
+        - name: source-table
+          description: "Delta table with Pokemon card data"
+          uc_securable:
+            securable_full_name: doan.pokemon_cards.cards
+            securable_type: TABLE
+            permission: SELECT
+
+        - name: serving-endpoint
+          description: "Foundation Model API for Agent Search query expansion"
+          serving_endpoint:
+            name: databricks-meta-llama-3-3-70b-instruct
+            permission: CAN_QUERY
+
+  jobs:
+    ingestion_pipeline:
+      name: "[${bundle.target}] Pokemon Cards Ingestion Pipeline"
+
+      environments:
+        - environment_key: sdk_env
+          spec:
+            client: "4"
+            dependencies:
+              - databricks-sdk>=0.40.0
+
+      tasks:
+        - task_key: ingest_hf_dataset
+          notebook_task:
+            notebook_path: ./ingestion_pipeline/01_ingest_hf_dataset.py
+
+        - task_key: extract_rarity
+          depends_on:
+            - task_key: ingest_hf_dataset
+          notebook_task:
+            notebook_path: ./ingestion_pipeline/02_extract_rarity.py
+
+        - task_key: create_vector_search
+          depends_on:
+            - task_key: extract_rarity
+          notebook_task:
+            notebook_path: ./ingestion_pipeline/03_create_vector_search.py
+          environment_key: sdk_env
+
+        - task_key: create_online_table
+          depends_on:
+            - task_key: create_vector_search
+          notebook_task:
+            notebook_path: ./ingestion_pipeline/04_create_online_table.py
+          environment_key: sdk_env
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://fe-vm-vdm-classic-hkbucz.cloud.databricks.com

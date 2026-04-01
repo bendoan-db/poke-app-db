@@ -1,0 +1,43 @@
+# Ingestion pipeline configuration
+# Update these values to match your workspace and naming conventions.
+
+catalog: doan
+schema: pokemon_cards
+table_name: cards
+
+# Vector Search
+vector_search:
+  endpoint_name: pokemon-cards-vs-endpoint
+  index_name: cards_index
+  endpoint_type: STORAGE_OPTIMIZED
+  embedding_column: search_text
+  embedding_model: databricks-gte-large-en
+  pipeline_type: TRIGGERED
+  columns_to_sync:
+    - id
+    - name
+    - hp
+    - set_name
+    - image_url
+    - search_text
+    - caption
+    - rarity
+
+# Synced Table (replaces deprecated Online Table)
+# Requires a Lakebase Autoscaling project to already exist.
+synced_table:
+  name: cards_synced
+  lakebase_catalog: doan_postgres
+  lakebase_schema: pokemoncards
+  scheduling_policy: TRIGGERED
+  # Lakebase Autoscaling project and branch
+  database_project: pokemondb
+  database_branch: production
+
+# AI Functions
+ai:
+  model: databricks-claude-sonnet-4
+  rarity_prompt: >-
+    Based on this Pokemon card description, classify the card rarity as exactly
+    one of: Common, Uncommon, Rare. Use the description of the card to help dterming the card rarity. If its not listed, then list as 'Common'
+    Respond with ONLY the single word: `Common`, `Uncommon`, or `Rare`.

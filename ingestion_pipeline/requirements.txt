@@ -1,0 +1,6 @@
+pyyaml
+pandas
+pyarrow
+databricks-sdk
+databricks-connect
+certifi
