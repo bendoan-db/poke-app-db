@@ -7,8 +7,17 @@ env:
   - name: VS_INDEX_NAME
     value: "doan.pokemon_cards.cards_index"
 
-  - name: TABLE_NAME
-    value: "doan.pokemon_cards.cards"
+  - name: PGENDPOINT
+    valueFrom: postgres
+
+  - name: PGDATABASE
+    value: "pokebase"
+
+  - name: PG_SCHEMA
+    value: "pokemon_cards"
+
+  - name: PG_TABLE
+    value: "cards_online"
 
   - name: LLM_MODEL
     value: "databricks-claude-sonnet-4-6"

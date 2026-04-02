@@ -1,107 +1,149 @@
 import os
 from functools import lru_cache
 
-import pandas as pd
-from databricks import sql
+import psycopg
+from psycopg.rows import dict_row
+from psycopg_pool import ConnectionPool
+from databricks import sdk
 from databricks.sdk import WorkspaceClient
-from databricks.sdk.core import Config
 
 # ---------------------------------------------------------------------------
-# Configuration — read from app.yaml env vars with sensible defaults
+# Configuration
 # ---------------------------------------------------------------------------
-TABLE = os.getenv("TABLE_NAME", "doan.pokemon_cards.cards")
 VS_INDEX = os.getenv("VS_INDEX_NAME", "doan.pokemon_cards.cards_index")
 LLM_MODEL = os.getenv("LLM_MODEL", "databricks-meta-llama-3-3-70b-instruct")
+
+PG_SCHEMA = os.getenv("PG_SCHEMA", "pokemoncards")
+PG_TABLE = os.getenv("PG_TABLE", "cards_online")
 
 COLUMNS = ["id", "name", "hp", "set_name", "image_url", "rarity", "caption"]
 VS_COLUMNS = ["id", "name", "hp", "set_name", "image_url", "rarity"]
 
 # ---------------------------------------------------------------------------
-# Connections (cached singletons)
+# Lakebase connection — follows flask-postgres-app template pattern
+# Auto-injected env vars: PGHOST, PGUSER, PGDATABASE, PGPORT, PGSSLMODE,
+# PGAPPNAME, PGENDPOINT (from postgres resource binding)
 # ---------------------------------------------------------------------------
 
-@lru_cache(maxsize=1)
-def _get_config():
-    return Config()
+_workspace_client = sdk.WorkspaceClient()
+_pg_endpoint = os.getenv("PGENDPOINT", "")
+_connection_pool = None
 
+
+class _OAuthConnection(psycopg.Connection):
+    """Connection subclass that auto-refreshes OAuth credentials."""
+
+    @classmethod
+    def connect(cls, conninfo="", **kwargs):
+        credential = _workspace_client.postgres.generate_database_credential(
+            endpoint=_pg_endpoint
+        )
+        kwargs["password"] = credential.token
+        return super().connect(conninfo, **kwargs)
+
+
+def _get_pg_pool() -> ConnectionPool:
+    """Get or create the Lakebase connection pool."""
+    global _connection_pool
+    if _connection_pool is None:
+        conn_string = (
+            f"dbname={os.getenv('PGDATABASE')} "
+            f"user={os.getenv('PGUSER')} "
+            f"host={os.getenv('PGHOST')} "
+            f"port={os.getenv('PGPORT')} "
+            f"sslmode={os.getenv('PGSSLMODE', 'require')} "
+            f"application_name={os.getenv('PGAPPNAME')}"
+        )
+        _connection_pool = ConnectionPool(
+            conn_string,
+            connection_class=_OAuthConnection,
+            min_size=2,
+            max_size=10,
+            kwargs={"row_factory": dict_row},
+        )
+    return _connection_pool
+
+
+def _pg_query(query, params=None) -> list[dict]:
+    """Execute a PostgreSQL query and return results as list of dicts."""
+    with _get_pg_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+            return list(cur.fetchall())
+
+
+
+
+# ---------------------------------------------------------------------------
+# Workspace client (for VS and LLM)
+# ---------------------------------------------------------------------------
 
 @lru_cache(maxsize=1)
 def _get_workspace_client():
     return WorkspaceClient()
 
 
-def _get_sql_connection():
-    cfg = _get_config()
-    return sql.connect(
-        server_hostname=cfg.host,
-        http_path=f"/sql/1.0/warehouses/{os.getenv('DATABRICKS_WAREHOUSE_ID')}",
-        credentials_provider=lambda: cfg.authenticate,
-    )
-
-
-def _sql_query(query: str) -> pd.DataFrame:
-    with _get_sql_connection() as conn:
-        with conn.cursor() as cursor:
-            cursor.execute(query)
-            return cursor.fetchall_arrow().to_pandas()
-
-
 # ---------------------------------------------------------------------------
-# Metrics (SQL warehouse)
+# Metrics (Lakebase)
 # ---------------------------------------------------------------------------
 
-def get_metrics() -> dict:
+def get_metrics(rarity: str | None = None) -> dict:
     """Return total cards, rare count, and distinct set count."""
-    df = _sql_query(f"""
-        SELECT
-            COUNT(*) AS total_cards,
-            SUM(CASE WHEN rarity = 'Rare' THEN 1 ELSE 0 END) AS rare_cards,
-            COUNT(DISTINCT set_name) AS total_sets
-        FROM {TABLE}
-    """)
-    row = df.iloc[0]
+    table = f'"{PG_SCHEMA}"."{PG_TABLE}"'
+    if rarity and rarity != "All":
+        rows = _pg_query(
+            f"SELECT COUNT(*) AS total_cards, "
+            f"SUM(CASE WHEN rarity = 'Rare' THEN 1 ELSE 0 END) AS rare_cards, "
+            f"COUNT(DISTINCT set_name) AS total_sets "
+            f"FROM {table} WHERE rarity = %s",
+            (rarity,),
+        )
+    else:
+        rows = _pg_query(
+            f"SELECT COUNT(*) AS total_cards, "
+            f"SUM(CASE WHEN rarity = 'Rare' THEN 1 ELSE 0 END) AS rare_cards, "
+            f"COUNT(DISTINCT set_name) AS total_sets "
+            f"FROM {table}"
+        )
+    row = rows[0]
     return {
         "total_cards": int(row["total_cards"]),
-        "rare_cards": int(row["rare_cards"]),
+        "rare_cards": int(row["rare_cards"] or 0),
         "total_sets": int(row["total_sets"]),
     }
 
 
 # ---------------------------------------------------------------------------
-# Default gallery (SQL warehouse)
+# Default gallery (Lakebase)
 # ---------------------------------------------------------------------------
 
 def get_default_cards(limit: int = 100, offset: int = 0) -> list[dict]:
-    """Fetch cards from the Delta table for the default gallery."""
+    """Fetch cards from the Lakebase synced table."""
     cols = ", ".join(COLUMNS)
-    df = _sql_query(
-        f"SELECT {cols} FROM {TABLE} ORDER BY name LIMIT {limit} OFFSET {offset}"
+    table = f'"{PG_SCHEMA}"."{PG_TABLE}"'
+    return _pg_query(
+        f"SELECT {cols} FROM {table} ORDER BY name LIMIT %s OFFSET %s",
+        (limit, offset),
     )
-    return df.to_dict(orient="records")
 
 
-def get_default_cards_filtered(
-    rarity: str, limit: int = 100, offset: int = 0
-) -> list[dict]:
+def get_default_cards_filtered(rarity: str, limit: int = 100, offset: int = 0) -> list[dict]:
     """Fetch cards filtered by rarity."""
     cols = ", ".join(COLUMNS)
-    df = _sql_query(
-        f"SELECT {cols} FROM {TABLE} WHERE rarity = '{rarity}' "
-        f"ORDER BY name LIMIT {limit} OFFSET {offset}"
+    table = f'"{PG_SCHEMA}"."{PG_TABLE}"'
+    return _pg_query(
+        f"SELECT {cols} FROM {table} WHERE rarity = %s ORDER BY name LIMIT %s OFFSET %s",
+        (rarity, limit, offset),
     )
-    return df.to_dict(orient="records")
 
 
 # ---------------------------------------------------------------------------
 # Vector Search (hybrid search)
 # ---------------------------------------------------------------------------
 
-def search_cards(
-    query: str, rarity: str | None = None, num_results: int = 50
-) -> list[dict]:
+def search_cards(query: str, rarity: str | None = None, num_results: int = 50) -> list[dict]:
     """Hybrid search against the Vector Search index."""
     w = _get_workspace_client()
-
     kwargs = dict(
         index_name=VS_INDEX,
         columns=VS_COLUMNS,
@@ -110,7 +152,6 @@ def search_cards(
         num_results=num_results,
     )
     if rarity and rarity != "All":
-        # Storage-optimized endpoints use SQL-like filter strings, not JSON
         kwargs["filters_json"] = f"rarity = '{rarity}'"
 
     results = w.vector_search_indexes.query_index(**kwargs)
@@ -118,8 +159,6 @@ def search_cards(
     cards: list[dict] = []
     result = results.result
     if result and result.data_array:
-        # Column names may be on result.manifest.columns or result.columns
-        # depending on SDK version — use the requested columns as fallback
         try:
             col_names = [c.name for c in result.manifest.columns]
         except AttributeError:
@@ -149,7 +188,6 @@ def expand_query(query: str) -> str:
     """Use an LLM to rewrite a natural language query for better Vector Search retrieval."""
     w = _get_workspace_client()
     openai_client = w.serving_endpoints.get_open_ai_client()
-
     response = openai_client.chat.completions.create(
         model=LLM_MODEL,
         messages=[

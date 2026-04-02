@@ -116,25 +116,11 @@ app.layout = dbc.Container(
         # -- Metrics row --
         dbc.Row(
             [
-                dbc.Col(
-                    make_metric_card(
-                        "Total Cards", metrics["total_cards"], "fa-layer-group"
-                    ),
-                    md=4,
-                ),
-                dbc.Col(
-                    make_metric_card(
-                        "Rare Cards", metrics["rare_cards"], "fa-star"
-                    ),
-                    md=4,
-                ),
-                dbc.Col(
-                    make_metric_card(
-                        "Card Sets", metrics["total_sets"], "fa-folder-open"
-                    ),
-                    md=4,
-                ),
+                dbc.Col(id="metric-total-cards", md=4),
+                dbc.Col(id="metric-rare-cards", md=4),
+                dbc.Col(id="metric-card-sets", md=4),
             ],
+            id="metrics-row",
             className="mb-4",
         ),
         # -- Search section --
@@ -329,12 +315,11 @@ def update_cards(search_clicks, search_submit, clear_clicks, rarity, query, agen
 
     # Search query present
     if query and query.strip():
-        rarity_filter = rarity if rarity != "All" else None
         banner = None
 
         if agent_mode:
             expanded = backend.expand_query(query.strip())
-            cards = backend.search_cards(expanded, rarity=rarity_filter, num_results=50)
+            cards = backend.search_cards(expanded, num_results=50)
             msg = f'Agent Search: {len(cards)} results'
             banner = dbc.Alert(
                 [
@@ -347,11 +332,9 @@ def update_cards(search_clicks, search_submit, clear_clicks, rarity, query, agen
                 className="mb-3",
             )
         else:
-            cards = backend.search_cards(query.strip(), rarity=rarity_filter, num_results=50)
+            cards = backend.search_cards(query.strip(), num_results=50)
             msg = f'Found {len(cards)} cards for "{query.strip()}"'
 
-        if rarity_filter:
-            msg += f" (filtered: {rarity_filter})"
         return cards, 0, msg, no_update, banner
 
     # No query — rarity filter only
@@ -362,6 +345,37 @@ def update_cards(search_clicks, search_submit, clear_clicks, rarity, query, agen
     # Default
     cards = backend.get_default_cards(limit=200)
     return cards, 0, f"Showing all {len(cards)} cards", no_update, None
+
+
+# ---------------------------------------------------------------------------
+# Callback 2b: Update metrics when cards-store or rarity filter changes
+# ---------------------------------------------------------------------------
+@app.callback(
+    [
+        Output("metric-total-cards", "children"),
+        Output("metric-rare-cards", "children"),
+        Output("metric-card-sets", "children"),
+    ],
+    [Input("cards-store", "data"), Input("rarity-store", "data")],
+    State("search-input", "value"),
+)
+def update_metrics(cards, rarity, query):
+    if query and query.strip() and cards:
+        # Search is active — compute from VS results (complete set, not capped)
+        total = len(cards)
+        rare = sum(1 for c in cards if c.get("rarity") == "Rare")
+        sets = len({c.get("set_name") for c in cards if c.get("set_name")})
+    else:
+        # Default/filtered view — query Lakebase for real counts
+        m = backend.get_metrics(rarity)
+        total = m["total_cards"]
+        rare = m["rare_cards"]
+        sets = m["total_sets"]
+    return (
+        make_metric_card("Total Cards", total, "fa-layer-group"),
+        make_metric_card("Rare Cards", rare, "fa-star"),
+        make_metric_card("Card Sets", sets, "fa-folder-open"),
+    )
 
 
 # ---------------------------------------------------------------------------
